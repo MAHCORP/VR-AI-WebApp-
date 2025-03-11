@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jarvis WebUI Interface</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background-color: #f4f4f4;
+    }
+
+    .container {
+      max-width: 800px;
+      background: #fff;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+
+    form, .output {
+      margin-top: 20px;
+    }
+
+    label, button {
+      font-size: 16px;
+      display: block;
+      margin: 10px 0;
+    }
+
+    button {
+      padding: 10px;
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background-color: #0056b3;
+    }
+
+    button.listening {
+      background-color: #dc3545;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .output div {
+      margin-bottom: 10px;
+    }
+
+    .status-indicator {
+      display: inline-block;
+      margin-left: 10px;
+      padding: 5px 10px;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+
+    .status-listening {
+      background-color: #dc3545;
+      color: white;
+    }
+
+    .status-idle {
+      background-color: #6c757d;
+      color: white;
+    }
+
+    #video {
+      max-width: 100%;
+      border-radius: 8px;
+    }
+
+    #canvas {
+      display: none;
+    }
+
+    #captureButton {
+      margin-top: 20px;
+      padding: 10px;
+      background-color: #28a745;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    #captureButton:hover {
+      background-color: #218838;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Jarvis Interface</h1>
+    <form id="loginForm">
+      <label for="email">Email:</label>
+      <input type="email" id="email" required>
+      <label for="password">Password:</label>
+      <input type="password" id="password" required>
+      <button type="submit">Log In</button>
+    </form>
+
+    <div id="app" class="hidden">
+      <label for="models">Choose a Model:</label>
+      <select id="models"></select>
+
+      <!-- Video Capture Section -->
+      <div id="videoContainer">
+        <video id="video" width="320" height="240" autoplay></video>
+        <button id="captureButton">Capture Image</button>
+        <canvas id="canvas" width="320" height="240"></canvas>
+      </div>
+
+      <button id="toggleListening">Start Listening</button>
+      <span id="listeningStatus" class="status-indicator status-idle">Microphone: Off</span>
+      <div class="output" id="responseOutput"></div>
+    </div>
+  </div>
+
+  <script>
+    const baseUrl = "http://localhost:3000";
+    const endpoint = `${baseUrl}/api/chat/completions`;
+    let recognition = null;
+    let currentImage = null;
+    let authToken = null;
+    let isListening = false;
+
+    // Start the camera
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const captureButton = document.getElementById("captureButton");
+
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+      .then(stream => video.srcObject = stream)
+      .catch(err => console.error("Camera error:", err));
+
+    captureButton.addEventListener("click", () => {
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      canvas.toBlob(blob => {
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = () => {
+          const base64Image = reader.result.split(",")[1];
+          currentImage = base64Image;  // Store the captured image in currentImage
+          displayCapturedImage(reader.result);
+          sendToGPT(base64Image);
+        };
+      }, "image/png");
+    });
+
+    function displayCapturedImage(imageSrc) {
+      const responseOutput = document.getElementById("responseOutput");
+      const img = document.createElement("img");
+      img.src = imageSrc;
+      img.alt = "Captured Image";
+      responseOutput.innerHTML = "<h3>Captured Image</h3>";
+      responseOutput.appendChild(img);
+    }
+
+    async function authenticateUser(email, password) {
+      try {
+        const response = await fetch(`${baseUrl}/api/v1/auths/signin`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ email, password }),
+        });
+
+        if (!response.ok) throw new Error('Invalid credentials');
+
+        const data = await response.json();
+        authToken = data.token;
+        localStorage.setItem('authToken', authToken);
+
+        document.getElementById("loginForm").classList.add("hidden");
+        document.getElementById("app").classList.remove("hidden");
+
+        await fetchModels();
+      } catch (error) {
+        console.error('Authentication failed:', error);
+        alert('Authentication failed: ' + error.message);
+      }
+    }
+
+    async function fetchModels() {
+      try {
+        const response = await fetch(`${baseUrl}/api/models`, {
+          headers: {
+            'Authorization': `Bearer ${authToken}`,
+          },
+        });
+
+        if (!response.ok) throw new Error('Failed to fetch models');
+
+        const data = await response.json();
+        const models = data.data;
+        const modelsDropdown = document.getElementById("models");
+
+        models.forEach((model) => {
+          const option = document.createElement("option");
+          option.value = model.id;
+          option.textContent = model.name;
+          modelsDropdown.appendChild(option);
+        });
+      } catch (error) {
+        console.error('Error fetching models:', error);
+        alert('Error fetching models: ' + error.message);
+      }
+    }
+
+    document.getElementById("loginForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const email = document.getElementById("email").value;
+      const password = document.getElementById("password").value;
+      await authenticateUser(email, password);
+    });
+
+    async function processQuery(modelId, userQuery) {
+      const requestBody = {
+        model: modelId,
+        messages: [{ role: "user", content: userQuery }],
+      };
+
+      if (currentImage) {
+        requestBody.messages[0].content = [
+          { type: "text", text: userQuery },
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${currentImage}` } }
+        ];
+      }
+
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer sk-21fb0ddb97e44a659400ab0673b2a649`,  // Hardcoded API key
+          },
+          body: JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to process query: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        const responseOutput = document.getElementById("responseOutput");
+        const systemResponseDiv = document.createElement("div");
+        systemResponseDiv.textContent = `Jarvis: ${data.choices[0].message.content}`;
+        responseOutput.appendChild(systemResponseDiv);
+      } catch (error) {
+        console.error("Error processing query:", error);
+        const responseOutput = document.getElementById("responseOutput");
+        const errorDiv = document.createElement("div");
+        errorDiv.className = "error-message";
+        errorDiv.textContent = `Error: ${error.message}`;
+        responseOutput.appendChild(errorDiv);
+      }
+    }
+
+    document.getElementById("toggleListening").addEventListener("click", () => {
+      const selectedModel = document.getElementById("models").value;
+      if (!selectedModel) {
+        alert("Please select a model.");
+        return;
+      }
+
+      if (!isListening) {
+        startListening(selectedModel);
+      } else {
+        stopListening();
+      }
+    });
+
+    function updateListeningStatus(listening) {
+      const button = document.getElementById("toggleListening");
+      const statusIndicator = document.getElementById("listeningStatus");
+      isListening = listening;
+
+      if (listening) {
+        button.textContent = "Stop Listening";
+        button.classList.add("listening");
+        statusIndicator.textContent = "Microphone: On";
+        statusIndicator.className = "status-indicator status-listening";
+      } else {
+        button.textContent = "Start Listening";
+        button.classList.remove("listening");
+        statusIndicator.textContent = "Microphone: Off";
+        statusIndicator.className = "status-indicator status-idle";
+      }
+    }
+
+    function startListening(modelId) {
+      if (!("webkitSpeechRecognition" in window)) {
+        alert("Your browser doesn't support speech recognition.");
+        return;
+      }
+
+      recognition = new webkitSpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = "en-US";
+
+      recognition.onstart = () => {
+        updateListeningStatus(true);
+        const responseOutput = document.getElementById("responseOutput");
+        const listeningDiv = document.createElement("div");
+        listeningDiv.textContent = `Jarvis: Listening...`;
+        responseOutput.appendChild(listeningDiv);
+      };
+
+      recognition.onresult = (event) => {
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript.trim();
+          const responseOutput = document.getElementById("responseOutput");
+          const userSpeechDiv = document.createElement("div");
+          userSpeechDiv.textContent = `You: ${transcript}`;
+          responseOutput.appendChild(userSpeechDiv);
+
+          if (transcript.toLowerCase().includes("jarvis")) {
+            const waitingDiv = document.createElement("div");
+            waitingDiv.textContent = `Jarvis: Processing your query... Please wait.`;
+            responseOutput.appendChild(waitingDiv);
+            processQuery(modelId, transcript);
+          }
+        }
+      };
+
+      recognition.onend = () => {
+        if (isListening) {
+          recognition.start();
+        } else {
+          updateListeningStatus(false);
+        }
+      };
+
+      recognition.onerror = (event) => {
+        console.error("Speech recognition error:", event);
+        const responseOutput = document.getElementById("responseOutput");
+        const errorDiv = document.createElement("div");
+        errorDiv.textContent = `Jarvis: Error occurred (${event.error}).`;
+        responseOutput.appendChild(errorDiv);
+        updateListeningStatus(false);
+      };
+
+      recognition.start();
+    }
+
+    function stopListening() {
+      if (recognition) {
+        recognition.stop();
+        isListening = false;
+        updateListeningStatus(false);
+      }
+    }
+  </script>
+</body>
+</html>
